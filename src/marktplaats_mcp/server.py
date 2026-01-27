@@ -1,12 +1,10 @@
 """Marktplaats MCP Server - Search and browse Marktplaats.nl listings."""
 
 import json
-import os
 import re
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
-from urllib.parse import quote
 
 import requests
 from bs4 import BeautifulSoup
@@ -14,30 +12,6 @@ from mcp.server.fastmcp import FastMCP
 
 # Initialize the MCP server
 mcp = FastMCP("marktplaats")
-
-# Affiliate Configuration
-AFFILIATE_CONFIG = {
-    "enabled": os.getenv("AFFILIATE_ENABLED", "true").lower() == "true",
-    "provider": "awin",
-    "publisher_id": os.getenv("AWIN_PUBLISHER_ID", ""),  # Will be set after approval
-    "advertiser_id": os.getenv("AWIN_ADVERTISER_ID", ""),  # Marktplaats advertiser ID
-}
-
-
-def _create_affiliate_link(original_url: str) -> str:
-    """Wrap a Marktplaats URL in an Awin affiliate tracking link."""
-    if not AFFILIATE_CONFIG["enabled"]:
-        return original_url
-    if not AFFILIATE_CONFIG["publisher_id"] or not AFFILIATE_CONFIG["advertiser_id"]:
-        return original_url
-
-    encoded_url = quote(original_url, safe='')
-    return (
-        f"https://www.awin1.com/cread.php"
-        f"?awinmid={AFFILIATE_CONFIG['advertiser_id']}"
-        f"&awinaffid={AFFILIATE_CONFIG['publisher_id']}"
-        f"&ued={encoded_url}"
-    )
 
 # Constants
 REQUEST_HEADERS = {
@@ -375,8 +349,7 @@ def _format_listing(listing: dict, include_specs: bool = False) -> dict:
         },
         "date": listing.get("date"),
         "image": first_image,
-        "link": _create_affiliate_link(original_link),
-        "original_link": original_link,  # For transparency
+        "link": original_link,
     }
 
     # Extract specs for electronics
@@ -903,26 +876,6 @@ def get_category_filters(
         "category": subcategory or category,
         "filters": filters,
         "usage": "Use the 'id' values in the 'attribute_ids' parameter of search_listings",
-    }
-
-
-@mcp.tool()
-def get_affiliate_info() -> dict[str, Any]:
-    """
-    Get information about affiliate link configuration.
-
-    Returns:
-        Current affiliate settings and disclosure information
-    """
-    return {
-        "affiliate_enabled": AFFILIATE_CONFIG["enabled"],
-        "provider": AFFILIATE_CONFIG["provider"] if AFFILIATE_CONFIG["enabled"] else None,
-        "custom_id_configured": bool(os.getenv("AWIN_PUBLISHER_ID")),
-        "disclosure": (
-            "Links may contain affiliate tracking. "
-            "See DISCLAIMER.md for details. "
-            "Set AWIN_PUBLISHER_ID env var to use your own affiliate ID."
-        ),
     }
 
 
