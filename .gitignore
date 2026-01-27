@@ -45,3 +45,7 @@ htmlcov/
 # Build
 *.manifest
 *.spec
+.venv/
+__pycache__/
+*.pyc
+.env
