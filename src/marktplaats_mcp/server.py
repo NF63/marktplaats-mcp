@@ -64,6 +64,24 @@ BUSINESS_TRAITS = {
     "SHOPPING_CART",
 }
 
+# Business name patterns for improved seller type detection
+BUSINESS_NAME_PATTERNS = [
+    r"used products",
+    r"buy\s*&?\s*sell",
+    r"mediahoek",
+    r"it[- ]?resale",
+    r"\.nl$",
+    r"\.com$",
+    r"b\.?v\.?$",
+    r"webshop",
+    r"shop\b",
+    r"store\b",
+    r"handel",
+    r"electronics",
+    r"refurbished",
+    r"outlet",
+]
+
 # Category data (commonly used categories)
 L1_CATEGORIES = {
     "antiek en kunst": 1,
@@ -173,12 +191,78 @@ def _parse_price_type(price_type: str, price_cents: int) -> str:
     return price_map.get(price_type, f"€ {price_cents / 100:,.2f}")
 
 
-def _detect_seller_type(traits: list[str]) -> str:
-    """Detect if seller is business or private based on traits."""
+def _detect_seller_type(traits: list[str], seller_name: str = "") -> str:
+    """Detect if seller is business or private based on traits and name patterns."""
     trait_set = set(traits)
     if trait_set & BUSINESS_TRAITS:
         return "business"
+
+    # Check seller name patterns
+    if seller_name:
+        name_lower = seller_name.lower()
+        for pattern in BUSINESS_NAME_PATTERNS:
+            if re.search(pattern, name_lower):
+                return "business"
+
     return "private"
+
+
+def _format_date_short(date_str: str) -> str:
+    """Convert date string to short format (e.g., '2d', '1w', 'Vandaag' -> '0d')."""
+    if not date_str:
+        return ""
+
+    date_lower = date_str.lower()
+    if "vandaag" in date_lower:
+        return "0d"
+    if "gisteren" in date_lower:
+        return "1d"
+    if "eergisteren" in date_lower:
+        return "2d"
+
+    # Try to parse "22 jan 26" format
+    month_map = {
+        "jan": 1, "feb": 2, "mrt": 3, "apr": 4, "mei": 5, "jun": 6,
+        "jul": 7, "aug": 8, "sep": 9, "okt": 10, "nov": 11, "dec": 12
+    }
+
+    match = re.match(r"(\d{1,2})\s+(\w{3})\s+'?(\d{2})", date_str)
+    if match:
+        day, month_str, year = match.groups()
+        month = month_map.get(month_str.lower())
+        if month:
+            try:
+                listing_date = datetime(2000 + int(year), month, int(day))
+                days_ago = (datetime.now() - listing_date).days
+                if days_ago < 7:
+                    return f"{days_ago}d"
+                elif days_ago < 30:
+                    return f"{days_ago // 7}w"
+                else:
+                    return f"{days_ago // 30}m"
+            except ValueError:
+                pass
+
+    return date_str
+
+
+def _format_condition_short(condition: str | None) -> str:
+    """Convert condition to single character: N=Nieuw, G=Gebruikt, Z=Zo goed als nieuw, D=Defect."""
+    if not condition:
+        return ""
+
+    cond_lower = condition.lower()
+    if "nieuw" in cond_lower and "zo goed" not in cond_lower:
+        return "N"
+    if "zo goed als nieuw" in cond_lower:
+        return "Z"
+    if "gebruikt" in cond_lower:
+        return "G"
+    if "refurbished" in cond_lower:
+        return "R"
+    if "defect" in cond_lower or "niet werkend" in cond_lower:
+        return "D"
+    return ""
 
 
 def _extract_specs_from_description(description: str, title: str = "") -> dict[str, str]:
@@ -253,6 +337,7 @@ def _format_listing(listing: dict, include_specs: bool = False) -> dict:
     location = listing.get("location", {})
     seller = listing.get("sellerInformation", {})
     traits = listing.get("traits", [])
+    seller_name = seller.get("sellerName", "")
 
     # Get first image if available
     pictures = listing.get("pictures", [])
@@ -284,9 +369,9 @@ def _format_listing(listing: dict, include_specs: bool = False) -> dict:
         },
         "seller": {
             "id": seller.get("sellerId"),
-            "name": seller.get("sellerName"),
+            "name": seller_name,
             "is_verified": seller.get("isVerified", False),
-            "type": _detect_seller_type(traits),
+            "type": _detect_seller_type(traits, seller_name),
         },
         "date": listing.get("date"),
         "image": first_image,
@@ -299,6 +384,81 @@ def _format_listing(listing: dict, include_specs: bool = False) -> dict:
         specs = _extract_specs_from_description(description, title)
         if specs:
             result["specs"] = specs
+
+    return result
+
+
+def _format_listing_compact(listing: dict) -> dict:
+    """Format a listing in compact mode for minimal token usage (~75% reduction)."""
+    price_info = listing.get("priceInfo", {})
+    location = listing.get("location", {})
+    seller = listing.get("sellerInformation", {})
+    traits = listing.get("traits", [])
+    seller_name = seller.get("sellerName", "")
+
+    # Distance handling
+    distance_meters = location.get("distanceMeters")
+    distance_km = None
+    if distance_meters is not None and distance_meters >= 0:
+        distance_km = round(distance_meters / 1000, 1)
+
+    description = listing.get("description", "")
+    title = listing.get("title", "")
+
+    # Get condition
+    condition = next(
+        (attr.get("value") for attr in listing.get("attributes", []) if attr.get("key") == "condition"),
+        None
+    )
+
+    # Price: return euros as int when possible, otherwise short string
+    price_type = price_info.get("priceType", "")
+    price_cents = price_info.get("priceCents", 0)
+    if price_type in ("FIXED", "RESERVED") and price_cents > 0:
+        price = price_cents // 100
+    elif price_type == "FREE" or price_cents == 0:
+        price = 0
+    elif price_type == "BID":
+        price = "bid"
+    elif price_type == "BID_FROM":
+        price = f">{price_cents // 100}"
+    elif price_type == "SEE_DESCRIPTION":
+        price = "?"
+    elif price_type == "TO_BE_AGREED_UPON":
+        price = "notk"
+    elif price_type == "EXCHANGE":
+        price = "ruil"
+    elif price_cents > 0:
+        # Fallback: just show the price in euros
+        price = price_cents // 100
+    else:
+        price = "?"
+
+    # Extract specs from title and description
+    specs = _extract_specs_from_description(description, title)
+
+    result = {
+        "id": listing.get("itemId"),
+        "title": title.strip(),
+        "price": price,
+        "city": location.get("cityName"),
+        "seller": "B" if _detect_seller_type(traits, seller_name) == "business" else "P",
+    }
+
+    # Only include optional fields if they have values
+    if distance_km is not None:
+        result["km"] = distance_km
+
+    cond_short = _format_condition_short(condition)
+    if cond_short:
+        result["cond"] = cond_short
+
+    date_short = _format_date_short(listing.get("date", ""))
+    if date_short:
+        result["age"] = date_short
+
+    if specs:
+        result["specs"] = specs
 
     return result
 
@@ -321,6 +481,7 @@ def search_listings(
     offered_since_days: int | None = None,
     attribute_ids: list[int] | None = None,
     extract_specs: bool = False,
+    compact: bool = False,
 ) -> dict[str, Any]:
     """
     Search for listings on Marktplaats.nl.
@@ -342,6 +503,9 @@ def search_listings(
         offered_since_days: Only show items posted within the last X days
         attribute_ids: List of attribute filter IDs (use get_category_filters to find these)
         extract_specs: Try to extract hardware specs (RAM, storage, CPU) from descriptions (for laptops/tablets)
+        compact: Return minimal response format (~75% smaller). Omits description, image, links.
+                 Use get_listing_details(id) for full info. Seller: B=business, P=private.
+                 Condition: N=new, Z=as good as new, G=used, R=refurbished, D=defect.
 
     Returns:
         Dictionary with total_count, returned_count, and list of listings
@@ -417,19 +581,40 @@ def search_listings(
     except json.JSONDecodeError:
         return {"error": "Invalid response from Marktplaats"}
 
-    # Format results
-    listings = [_format_listing(listing, include_specs=extract_specs) for listing in data.get("listings", [])]
+    # Format results based on compact mode
+    if compact:
+        listings = [_format_listing_compact(listing) for listing in data.get("listings", [])]
+    else:
+        listings = [_format_listing(listing, include_specs=extract_specs) for listing in data.get("listings", [])]
 
     # Filter by seller type if requested
     if seller_type:
         seller_type_lower = seller_type.lower()
-        if seller_type_lower in ("business", "zakelijk"):
-            listings = [l for l in listings if l["seller"]["type"] == "business"]
-        elif seller_type_lower in ("private", "particulier"):
-            listings = [l for l in listings if l["seller"]["type"] == "private"]
+        if compact:
+            # In compact mode, seller is "B" or "P"
+            if seller_type_lower in ("business", "zakelijk"):
+                listings = [l for l in listings if l["seller"] == "B"]
+            elif seller_type_lower in ("private", "particulier"):
+                listings = [l for l in listings if l["seller"] == "P"]
+        else:
+            if seller_type_lower in ("business", "zakelijk"):
+                listings = [l for l in listings if l["seller"]["type"] == "business"]
+            elif seller_type_lower in ("private", "particulier"):
+                listings = [l for l in listings if l["seller"]["type"] == "private"]
 
     total_count = data.get("totalResultCount", 0)
 
+    # Compact response format
+    if compact:
+        result = {
+            "total": total_count,
+            "listings": listings,
+        }
+        if offset + len(listings) < total_count:
+            result["next"] = offset + len(listings)
+        return result
+
+    # Full response format
     result = {
         "total_count": total_count,
         "returned_count": len(listings),
